@@ -41,8 +41,11 @@ locals {
   # if var.cloudtrail_logs_prefix is empty then be sure to remove // in the path
   cloudtrail_logs_path = var.cloudtrail_logs_prefix == "" ? "AWSLogs" : "${var.cloudtrail_logs_prefix}/AWSLogs"
 
-  # finally, format the full final resources ARN list
-  cloudtrail_resources = toset(formatlist("${local.bucket_arn}/${local.cloudtrail_logs_path}/%s/*", local.cloudtrail_accounts))
+  # format the full account resources ARN list
+  cloudtrail_account_resources = toset(formatlist("${local.bucket_arn}/${local.cloudtrail_logs_path}/%s/*", local.cloudtrail_accounts))
+
+  # finally, add the organization id path if one is specified
+  cloudtrail_resources = var.cloudtrail_org_id == "" ? local.cloudtrail_account_resources : setunion(local.cloudtrail_account_resources, ["${local.bucket_arn}/${local.cloudtrail_logs_path}/${var.cloudtrail_org_id}/*"])
 
   #
   # Cloudwatch Logs locals
@@ -69,6 +72,14 @@ locals {
 
   config_logs_path = var.config_logs_prefix == "" ? "AWSLogs" : "${var.config_logs_prefix}/AWSLogs"
 
+  # Config does a writability check by writing to key "[prefix]/AWSLogs/[accountId]/Config/ConfigWritabilityCheckFile".
+  # When there is an oversize configuration item change notification, Config will write the notification to S3 at the path.
+  # Therefore, you cannot limit the policy to the region.
+  # For example:
+  # [prefix]/AWSLogs/[accountId]/Config/global/[year]/[month]/[day]/
+  # OversizedChangeNotification/AWS::IAM::Policy/
+  # [accountId]_Config_global_ChangeNotification_AWS::IAM::Policy_[resourceId]_[timestamp]_[configurationStateId].json.gz
+  # Therefore, do not extend the resource path to include the region as shown in the AWS Console.
   config_resources = sort(formatlist("${local.bucket_arn}/${local.config_logs_path}/%s/Config/*", local.config_accounts))
 
   #
@@ -356,6 +367,11 @@ resource "aws_s3_bucket" "aws_logs" {
   policy        = data.aws_iam_policy_document.main.json
   force_destroy = var.force_destroy
 
+  versioning {
+    enabled    = var.enable_versioning
+    mfa_delete = var.enable_mfa_delete
+  }
+
   lifecycle_rule {
     id      = "expire_all_logs"
     prefix  = "/*"
@@ -363,6 +379,18 @@ resource "aws_s3_bucket" "aws_logs" {
 
     expiration {
       days = var.s3_log_bucket_retention
+    }
+
+    noncurrent_version_expiration {
+      days = var.noncurrent_version_retention
+    }
+  }
+
+  dynamic "logging" {
+    for_each = var.logging_target_bucket[*]
+    content {
+      target_bucket = logging.value
+      target_prefix = var.logging_target_prefix
     }
   }
 

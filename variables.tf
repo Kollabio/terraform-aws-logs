@@ -9,6 +9,12 @@ variable "s3_log_bucket_retention" {
   type        = string
 }
 
+variable "noncurrent_version_retention" {
+  description = "Number of days to retain non-current versions of objects if versioning is enabled."
+  type        = string
+  default     = 30
+}
+
 variable "s3_bucket_acl" {
   description = "Set bucket ACL per [AWS S3 Canned ACL](<https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl>) list."
   default     = "log-delivery-write"
@@ -148,8 +154,38 @@ variable "nlb_logs_prefixes" {
   type        = list(string)
 }
 
-variable tags {
+variable "cloudtrail_org_id" {
+  description = "AWS Organization ID for CloudTrail."
+  default     = ""
+  type        = string
+}
+
+variable "logging_target_bucket" {
+  description = "S3 Bucket to send S3 logs to. Disables logging if omitted."
+  default     = null
+  type        = string
+}
+
+variable "logging_target_prefix" {
+  description = "Prefix for logs going into the log_s3_bucket."
+  default     = "s3/"
+  type        = string
+}
+
+variable "tags" {
   type        = map(string)
   default     = {}
   description = "A mapping of tags to assign to the logs bucket. Please note that tags with a conflicting key will not override the original tag."
+}
+
+variable "enable_versioning" {
+  description = "A bool that enables versioning for the log bucket."
+  default     = false
+  type        = bool
+}
+
+variable "enable_mfa_delete" {
+  description = "A bool that requires MFA to delete the log bucket."
+  default     = false
+  type        = bool
 }
