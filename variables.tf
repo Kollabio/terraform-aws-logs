@@ -9,9 +9,21 @@ variable "s3_log_bucket_retention" {
   type        = string
 }
 
+variable "noncurrent_version_retention" {
+  description = "Number of days to retain non-current versions of objects if versioning is enabled."
+  type        = string
+  default     = 30
+}
+
 variable "s3_bucket_acl" {
   description = "Set bucket ACL per [AWS S3 Canned ACL](<https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl>) list."
-  default     = "log-delivery-write"
+  default     = null
+  type        = string
+}
+
+variable "s3_logs_prefix" {
+  description = "S3 prefix for S3 access logs."
+  default     = "s3"
   type        = string
 }
 
@@ -100,6 +112,12 @@ variable "allow_redshift" {
   type        = bool
 }
 
+variable "allow_s3" {
+  description = "Allow S3 service to log to bucket."
+  default     = false
+  type        = bool
+}
+
 variable "create_public_access_block" {
   description = "Whether to create a public_access_block restricting public access to the bucket."
   default     = true
@@ -148,8 +166,60 @@ variable "nlb_logs_prefixes" {
   type        = list(string)
 }
 
-variable tags {
+variable "cloudtrail_org_id" {
+  description = "AWS Organization ID for CloudTrail."
+  default     = ""
+  type        = string
+}
+
+variable "logging_target_bucket" {
+  description = "S3 Bucket to send S3 logs to. Disables logging if omitted."
+  default     = ""
+  type        = string
+}
+
+variable "logging_target_prefix" {
+  description = "Prefix for logs going into the log_s3_bucket."
+  default     = "s3/"
+  type        = string
+}
+
+variable "tags" {
   type        = map(string)
   default     = {}
   description = "A mapping of tags to assign to the logs bucket. Please note that tags with a conflicting key will not override the original tag."
+}
+
+variable "versioning_status" {
+  description = "A string that indicates the versioning status for the log bucket."
+  default     = "Disabled"
+  type        = string
+  validation {
+    condition     = contains(["Enabled", "Disabled", "Suspended"], var.versioning_status)
+    error_message = "Valid values for versioning_status are Enabled, Disabled, or Suspended."
+  }
+}
+
+variable "enable_s3_log_bucket_lifecycle_rule" {
+  description = "Whether the lifecycle rule for the log bucket is enabled."
+  default     = true
+  type        = bool
+}
+
+variable "enable_mfa_delete" {
+  description = "A bool that requires MFA to delete the log bucket."
+  default     = false
+  type        = bool
+}
+
+variable "control_object_ownership" {
+  description = "Whether to manage S3 Bucket Ownership Controls on this bucket."
+  type        = bool
+  default     = true
+}
+
+variable "object_ownership" {
+  description = "Object ownership. Valid values: BucketOwnerEnforced, BucketOwnerPreferred or ObjectWriter."
+  type        = string
+  default     = "BucketOwnerEnforced"
 }

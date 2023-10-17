@@ -22,11 +22,14 @@ resource "aws_lb" "test_alb" {
 
 module "aws_cloudtrail" {
   source  = "trussworks/cloudtrail/aws"
-  version = "~> 2"
+  version = "~> 4"
 
+  iam_role_name             = "cloudtrail-cloudwatch-logs-role-${var.test_name}"
   s3_bucket_name            = module.aws_logs.aws_logs_bucket
   s3_key_prefix             = "cloudtrail"
   cloudwatch_log_group_name = var.test_name
+  trail_name                = "cloudtrail-${var.test_name}"
+  iam_policy_name           = "cloudtrail-cloudwatch-logs-policy-${var.test_name}"
 }
 
 module "config" {
@@ -99,13 +102,19 @@ resource "aws_redshift_subnet_group" "test_redshift" {
 
 resource "aws_s3_bucket" "log_source_bucket" {
   bucket        = "${var.test_name}-source"
-  acl           = "private"
   force_destroy = var.force_destroy
+}
 
-  logging {
-    target_bucket = module.aws_logs.aws_logs_bucket
-    target_prefix = "log/"
-  }
+resource "aws_s3_bucket_acl" "log_source_bucket" {
+  bucket = aws_s3_bucket.log_source_bucket.id
+  acl    = "private"
+}
+
+resource "aws_s3_bucket_logging" "log_source_bucket" {
+  bucket = aws_s3_bucket.log_source_bucket.id
+
+  target_bucket = module.aws_logs.aws_logs_bucket
+  target_prefix = "log/"
 }
 
 module "vpc" {

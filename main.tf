@@ -3,11 +3,6 @@
 data "aws_elb_service_account" "main" {
 }
 
-# Get the account id of the RedShift service account in a given region for the
-# purpose of allowing RedShift to store audit data in S3.
-data "aws_redshift_service_account" "main" {
-}
-
 # The AWS account id
 data "aws_caller_identity" "current" {
 }
@@ -41,8 +36,11 @@ locals {
   # if var.cloudtrail_logs_prefix is empty then be sure to remove // in the path
   cloudtrail_logs_path = var.cloudtrail_logs_prefix == "" ? "AWSLogs" : "${var.cloudtrail_logs_prefix}/AWSLogs"
 
-  # finally, format the full final resources ARN list
-  cloudtrail_resources = toset(formatlist("${local.bucket_arn}/${local.cloudtrail_logs_path}/%s/*", local.cloudtrail_accounts))
+  # format the full account resources ARN list
+  cloudtrail_account_resources = toset(formatlist("${local.bucket_arn}/${local.cloudtrail_logs_path}/%s/*", local.cloudtrail_accounts))
+
+  # finally, add the organization id path if one is specified
+  cloudtrail_resources = var.cloudtrail_org_id == "" ? local.cloudtrail_account_resources : setunion(local.cloudtrail_account_resources, ["${local.bucket_arn}/${local.cloudtrail_logs_path}/${var.cloudtrail_org_id}/*"])
 
   #
   # Cloudwatch Logs locals
@@ -69,6 +67,14 @@ locals {
 
   config_logs_path = var.config_logs_prefix == "" ? "AWSLogs" : "${var.config_logs_prefix}/AWSLogs"
 
+  # Config does a writability check by writing to key "[prefix]/AWSLogs/[accountId]/Config/ConfigWritabilityCheckFile".
+  # When there is an oversize configuration item change notification, Config will write the notification to S3 at the path.
+  # Therefore, you cannot limit the policy to the region.
+  # For example:
+  # [prefix]/AWSLogs/[accountId]/Config/global/[year]/[month]/[day]/
+  # OversizedChangeNotification/AWS::IAM::Policy/
+  # [accountId]_Config_global_ChangeNotification_AWS::IAM::Policy_[resourceId]_[timestamp]_[configurationStateId].json.gz
+  # Therefore, do not extend the resource path to include the region as shown in the AWS Console.
   config_resources = sort(formatlist("${local.bucket_arn}/${local.config_logs_path}/%s/Config/*", local.config_accounts))
 
   #
@@ -133,10 +139,16 @@ locals {
   # doesn't support logging to multiple prefixes
   redshift_effect = var.default_allow || var.allow_redshift ? "Allow" : "Deny"
 
-  # redshift logs user in our region
-  redshift_principal = "arn:${data.aws_partition.current.partition}:iam::${data.aws_redshift_service_account.main.id}:user/logs"
-
   redshift_resource = "${local.bucket_arn}/${var.redshift_logs_prefix}/*"
+
+  #
+  # S3 locals
+  #
+
+  # doesn't support logging to multiple accounts
+  s3_effect = var.default_allow || var.allow_s3 ? "Allow" : "Deny"
+
+  s3_resources = ["${local.bucket_arn}/${var.s3_logs_prefix}/*"]
 }
 
 #
@@ -218,26 +230,34 @@ data "aws_iam_policy_document" "main" {
       type        = "Service"
       identifiers = ["config.amazonaws.com"]
     }
-    actions   = ["s3:GetBucketAcl"]
+    actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [local.bucket_arn]
   }
 
-  statement {
-    sid    = "config-bucket-delivery"
-    effect = local.config_effect
-    principals {
-      type        = "Service"
-      identifiers = ["config.amazonaws.com"]
-    }
-    actions = ["s3:PutObject"]
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
-    resources = local.config_resources
-  }
+  dynamic "statement" {
+    for_each = { for k, v in local.config_accounts : k => v }
+    content {
+      sid    = "config-bucket-delivery-${statement.key}"
+      effect = local.config_effect
+      principals {
+        type        = "Service"
+        identifiers = ["config.amazonaws.com"]
+      }
+      actions = ["s3:PutObject", "s3:PutObjectAcl"]
+      condition {
+        test     = "StringEquals"
+        variable = "AWS:SourceAccount"
+        values   = [statement.value]
 
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "s3:x-amz-acl"
+        values   = ["bucket-owner-full-control"]
+      }
+      resources = ["${local.bucket_arn}/${local.config_logs_path}/${statement.value}/Config/*"]
+    }
+  }
   #
   # ELB bucket policies
   #
@@ -307,8 +327,8 @@ data "aws_iam_policy_document" "main" {
     sid    = "redshift-logs-put-object"
     effect = local.redshift_effect
     principals {
-      type        = "AWS"
-      identifiers = [local.redshift_principal]
+      type        = "Service"
+      identifiers = ["redshift.amazonaws.com"]
     }
     actions   = ["s3:PutObject"]
     resources = [local.redshift_resource]
@@ -318,11 +338,26 @@ data "aws_iam_policy_document" "main" {
     sid    = "redshift-logs-get-bucket-acl"
     effect = local.redshift_effect
     principals {
-      type        = "AWS"
-      identifiers = [local.redshift_principal]
+      type        = "Service"
+      identifiers = ["redshift.amazonaws.com"]
     }
     actions   = ["s3:GetBucketAcl"]
     resources = [local.bucket_arn]
+  }
+
+  #
+  # S3 server access log bucket policies
+  #
+
+  statement {
+    sid    = "s3-logs-put-object"
+    effect = local.s3_effect
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+    actions   = ["s3:PutObject"]
+    resources = local.s3_resources
   }
 
   #
@@ -352,34 +387,93 @@ data "aws_iam_policy_document" "main" {
 
 resource "aws_s3_bucket" "aws_logs" {
   bucket        = var.s3_bucket_name
-  acl           = var.s3_bucket_acl
-  policy        = data.aws_iam_policy_document.main.json
   force_destroy = var.force_destroy
 
-  lifecycle_rule {
-    id      = "expire_all_logs"
-    prefix  = "/*"
-    enabled = true
+  tags = merge(
+    var.tags, {
+      Name = var.s3_bucket_name
+    }
+  )
+}
+
+resource "aws_s3_bucket_policy" "aws_logs" {
+  bucket = aws_s3_bucket.aws_logs.id
+  policy = data.aws_iam_policy_document.main.json
+  lifecycle {
+    ignore_changes = [
+      # Allows a user to append a custom policy if needed
+      policy
+    ]
+  }
+}
+
+resource "aws_s3_bucket_acl" "aws_logs" {
+  count      = var.s3_bucket_acl != null ? 1 : 0
+  bucket     = aws_s3_bucket.aws_logs.id
+  acl        = var.s3_bucket_acl
+  depends_on = [aws_s3_bucket_ownership_controls.aws_logs]
+}
+
+resource "aws_s3_bucket_ownership_controls" "aws_logs" {
+  count = var.control_object_ownership ? 1 : 0
+
+  bucket = aws_s3_bucket.aws_logs.id
+
+  rule {
+    object_ownership = var.object_ownership
+  }
+
+  depends_on = [
+    aws_s3_bucket_policy.aws_logs,
+    aws_s3_bucket_public_access_block.public_access_block,
+    aws_s3_bucket.aws_logs
+  ]
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "aws_logs" {
+  bucket = aws_s3_bucket.aws_logs.id
+
+  rule {
+    id     = "expire_all_logs"
+    status = var.enable_s3_log_bucket_lifecycle_rule ? "Enabled" : "Disabled"
+
+    filter {}
 
     expiration {
       days = var.s3_log_bucket_retention
     }
-  }
 
-  server_side_encryption_configuration {
-    rule {
-      apply_server_side_encryption_by_default {
-        sse_algorithm = "AES256"
-      }
+    noncurrent_version_expiration {
+      noncurrent_days = var.noncurrent_version_retention
     }
   }
+}
 
-  tags = merge(
-    var.tags, {
-      Name       = var.s3_bucket_name
-      Automation = "Terraform"
+resource "aws_s3_bucket_server_side_encryption_configuration" "aws_logs" {
+  bucket = aws_s3_bucket.aws_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
     }
-  )
+  }
+}
+
+resource "aws_s3_bucket_logging" "aws_logs" {
+  count = var.logging_target_bucket != "" ? 1 : 0
+
+  bucket = aws_s3_bucket.aws_logs.id
+
+  target_bucket = var.logging_target_bucket
+  target_prefix = var.logging_target_prefix
+}
+
+resource "aws_s3_bucket_versioning" "aws_logs" {
+  bucket = aws_s3_bucket.aws_logs.id
+  versioning_configuration {
+    status     = var.versioning_status
+    mfa_delete = var.enable_mfa_delete ? "Enabled" : null
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "public_access_block" {
